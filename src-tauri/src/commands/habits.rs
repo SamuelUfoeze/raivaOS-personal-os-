@@ -80,6 +80,24 @@ pub fn log_habit_tick(db: State<Database>, habit_id: String, date_string: String
 }
 
 #[tauri::command]
+pub fn get_habit_logs_all(db: State<Database>) -> Result<Vec<HabitLog>, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare("SELECT * FROM habit_logs ORDER BY date_string DESC")
+        .map_err(|e| e.to_string())?;
+    let logs = stmt.query_map([], |row| {
+        Ok(HabitLog {
+            id: row.get("id")?,
+            habit_id: row.get("habit_id")?,
+            date_string: row.get("date_string")?,
+            status: row.get::<_, i32>("status")? != 0,
+        })
+    }).map_err(|e| e.to_string())?
+    .filter_map(|r| r.ok())
+    .collect();
+    Ok(logs)
+}
+
+#[tauri::command]
 pub fn get_habit_logs(db: State<Database>, habit_id: String, days: i32) -> Result<Vec<HabitLog>, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn.prepare(

@@ -41,6 +41,7 @@ pub fn run() {
             commands::delete_habit,
             commands::log_habit_tick,
             commands::get_habit_logs,
+            commands::get_habit_logs_all,
             commands::get_habit_today_status,
             // Projects
             commands::get_all_projects,
