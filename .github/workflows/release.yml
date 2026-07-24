@@ -1,0 +1,75 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            bundle: AppImage
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
+
+      - run: npm ci
+
+      - run: npm run tauri build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: src-tauri/target/release/bundle/${{ matrix.bundle }}/
+
+  publish:
+    needs: [build]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate update.json
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          APPIMAGE=$(find artifacts -name "*.AppImage" -type f | head -1)
+          APPIMAGE_NAME=$(basename "$APPIMAGE")
+          SIGNATURE=$(cat artifacts/*/*.sig 2>/dev/null | head -1 || echo "")
+          RELASE_URL="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$APPIMAGE_NAME"
+          jq -n \
+            --arg ver "$VERSION" \
+            --arg sig "$SIGNATURE" \
+            --arg url "$RELASE_URL" \
+            '{version: $ver, notes: "See release notes", pub_date: (now | strftime("%Y-%m-%dT%H:%M:%SZ")), platforms: {"linux-x86_64": {signature: $sig, url: $url}}}' > update.json
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**/*
+            update.json
