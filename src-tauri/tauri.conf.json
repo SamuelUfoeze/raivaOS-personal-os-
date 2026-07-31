@@ -1,6 +1,6 @@
 {
   "productName": "RAIVA OS",
-  "version": "1.2.0",
+  "version": "1.4.0",
   "identifier": "com.raiva.os",
   "build": {
     "frontendDist": "../dist",

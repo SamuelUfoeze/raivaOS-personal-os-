@@ -24,13 +24,144 @@ function ensureSync() {
   }
 }
 
-export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  if (isTauri) {
-    const { invoke: ti } = await import("@tauri-apps/api/core");
-    return ti<T>(cmd, args);
+function invokeWithTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`Tauri IPC timeout after ${ms}ms`)), ms)
+    ),
+  ]);
+}
+
+// ── In-memory cache ──────────────────────────────────────────────
+const dataCache = new Map<string, { data: any }>();
+
+function cacheKey(cmd: string, args?: Record<string, unknown>): string {
+  return cmd + '\0' + JSON.stringify(args ?? {});
+}
+
+function isReadCmd(cmd: string): boolean {
+  return cmd.startsWith("get_");
+}
+
+function isWriteCmd(cmd: string): boolean {
+  return cmd.startsWith("create_") || cmd.startsWith("update_") ||
+         cmd.startsWith("delete_") || cmd.startsWith("toggle_") ||
+         cmd.startsWith("log_") || cmd.startsWith("save_") ||
+         cmd.startsWith("upsert_") || cmd === "run_audit";
+}
+
+// ── Entity-aware cache management ────────────────────────────────
+// Maps write commands to read prefixes they invalidate
+function affectedReadPrefixes(cmd: string): string[] {
+  const map: Record<string, string[]> = {
+    create_note: ["get_all_notes", "get_all_tags"],
+    update_note: ["get_all_notes", "get_all_tags"],
+    delete_note: ["get_all_notes", "get_all_tags"],
+    toggle_favorite: ["get_all_notes"],
+    create_habit: ["get_all_habits"],
+    update_habit: ["get_all_habits"],
+    delete_habit: ["get_all_habits", "get_habit_today_status"],
+    log_habit_tick: ["get_habit_today_status", "get_habit_logs", "get_habit_logs_all"],
+    create_project: ["get_all_projects"],
+    update_project: ["get_all_projects"],
+    delete_project: ["get_all_projects"],
+    create_goal: ["get_all_goals", "get_all_projects"],
+    update_goal: ["get_all_goals", "get_all_projects"],
+    delete_goal: ["get_all_goals", "get_all_projects"],
+    create_task: ["get_all_tasks", "get_all_tasks_with_sources", "get_tasks_by_quadrant"],
+    update_task: ["get_all_tasks", "get_all_tasks_with_sources", "get_tasks_by_quadrant"],
+    update_task_status: ["get_all_tasks", "get_all_tasks_with_sources", "get_tasks_by_quadrant"],
+    delete_task: ["get_all_tasks", "get_all_tasks_with_sources", "get_tasks_by_quadrant"],
+    create_chat_thread: ["get_chat_threads"],
+    delete_chat_thread: ["get_chat_threads"],
+    save_chat_message: ["get_chat_messages"],
+    upsert_vision: ["get_all_visions"],
+    delete_vision: ["get_all_visions"],
+    log_focus_session: ["get_focus_sessions"],
+    run_audit: ["get_latest_audit"],
+  };
+  return map[cmd] ?? [];
+}
+
+// Creates that return an item matching their list's type (safe to append)
+const CAN_DIRECTLY_APPEND = new Set([
+  "create_note", "create_habit", "create_task",
+  "create_chat_thread", "save_chat_message", "upsert_vision",
+]);
+
+// Updates that return the full updated object
+const CAN_DIRECTLY_UPDATE = new Set(["update_note", "update_habit"]);
+
+function applyCacheWrite(cmd: string, result: unknown, args?: Record<string, unknown>) {
+  const prefixes = affectedReadPrefixes(cmd);
+  if (!prefixes.length) return;
+
+  for (const [key, entry] of dataCache) {
+    const sepIdx = key.indexOf("\0");
+    const keyPrefix = sepIdx >= 0 ? key.slice(0, sepIdx) : key;
+    if (!prefixes.some((p) => keyPrefix === p)) continue;
+
+    const arr = entry.data;
+    if (!Array.isArray(arr)) { dataCache.delete(key); continue; }
+
+    if (cmd.startsWith("create_") && CAN_DIRECTLY_APPEND.has(cmd) && result) {
+      dataCache.set(key, { data: [...arr, result] });
+    } else if (cmd.startsWith("delete_")) {
+      const id = (args?.id as string) ?? (args?.thread_id as string);
+      dataCache.set(key, { data: id ? arr.filter((x: any) => x.id !== id) : arr });
+    } else if (cmd.startsWith("update_") && CAN_DIRECTLY_UPDATE.has(cmd) && result && (result as any).id) {
+      const rid = (result as any).id;
+      dataCache.set(key, { data: arr.map((x: any) => (x.id === rid ? result : x)) });
+    } else {
+      dataCache.delete(key);
+    }
   }
-  ensureSync();
-  return mockInvoke<T>(cmd, args);
+}
+
+export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  const key = cacheKey(cmd, args);
+
+  if (isReadCmd(cmd)) {
+    const cached = dataCache.get(key);
+    if (cached) return cached.data as T;
+  }
+
+  let data: T;
+  if (isTauri) {
+    try {
+      const ti = (window as any).__TAURI_INTERNALS__.invoke as (
+        cmd: string,
+        args?: Record<string, unknown>,
+      ) => Promise<T>;
+      data = await invokeWithTimeout(ti(cmd, args), 5_000);
+    } catch (e) {
+      console.warn(`Tauri IPC failed for "${cmd}", falling back to mock:`, e);
+      ensureSync();
+      data = await mockInvoke<T>(cmd, args);
+    }
+  } else {
+    ensureSync();
+    data = await mockInvoke<T>(cmd, args);
+  }
+
+  if (isReadCmd(cmd)) {
+    dataCache.set(key, { data });
+  } else if (isWriteCmd(cmd)) {
+    applyCacheWrite(cmd, data as any, args);
+  }
+
+  return data;
+}
+
+// ── Eager prefetch (call once on startup) ────────────────────────
+export function prefetchAll(): Promise<void> {
+  return invoke("get_all_notes")
+    .then(() => invoke("get_all_tasks"))
+    .then(() => invoke("get_all_projects"))
+    .then(() => invoke("get_all_habits"))
+    .then(() => invoke("get_habit_today_status"))
+    .then(() => {});
 }
 
 // ── localStorage-based mock for browser dev ──────────────────────

@@ -1,5 +1,6 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import Layout from "./components/Layout";
+import { prefetchAll } from "./lib/db";
 import ThemeProvider from "./components/ThemeProvider";
 import Dashboard from "./screens/Dashboard";
 import NotesList from "./screens/NotesList";
@@ -18,11 +19,24 @@ import SettingsScreen from "./screens/SettingsScreen";
 export default function App() {
   const [screen, setScreen] = useState("dashboard");
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    prefetchAll().then(() => setReady(true));
+  }, []);
 
   const handleNavigate = (s: string) => {
     setScreen(s);
     setSelectedNoteId(null);
   };
+
+  if (!ready) {
+    return (
+      <div className="flex items-center justify-center h-screen bg-gray-900 text-white text-lg">
+        Loading…
+      </div>
+    );
+  }
 
   return (
     <ThemeProvider>
