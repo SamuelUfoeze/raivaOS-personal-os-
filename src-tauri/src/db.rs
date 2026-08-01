@@ -31,8 +31,7 @@ impl Database {
         .unwrap_or(0)
     }
 
-    fn set_schema_version(&self, version: i32) {
-        let conn = self.conn.lock().unwrap();
+    fn set_schema_version(conn: &Connection, version: i32) {
         conn.execute(
             "INSERT INTO _schema_version (version) VALUES (?1)",
             rusqlite::params![version],
@@ -172,7 +171,24 @@ impl Database {
             // Always update SCHEMA_VERSION to the latest
         }
 
-        self.set_schema_version(SCHEMA_VERSION);
+        // v1 migration: older installs predate the `status` column on projects.
+        // Guarantees the projects list can always load, even for legacy DBs.
+        let has_status: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = 'status'",
+                [],
+                |row| row.get::<_, i64>(0).map(|c| c > 0),
+            )
+            .unwrap_or(false);
+        if !has_status {
+            if let Err(e) = conn.execute_batch(
+                "ALTER TABLE projects ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
+            ) {
+                eprintln!("[db] failed to add projects.status: {e}");
+            }
+        }
+
+        Self::set_schema_version(&conn, SCHEMA_VERSION);
         Ok(())
     }
 }

@@ -79,6 +79,24 @@ pub fn create_goal(db: State<Database>, req: CreateGoalRequest) -> Result<Goal, 
 }
 
 #[tauri::command]
+pub fn update_goal(db: State<Database>, id: String, title: Option<String>, status: Option<String>, priority: Option<String>) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    if let Some(title) = title {
+        conn.execute("UPDATE goals SET title = ?1 WHERE id = ?2", params![title, id])
+            .map_err(|e| e.to_string())?;
+    }
+    if let Some(status) = status {
+        conn.execute("UPDATE goals SET status = ?1 WHERE id = ?2", params![status, id])
+            .map_err(|e| e.to_string())?;
+    }
+    if let Some(priority) = priority {
+        conn.execute("UPDATE goals SET priority = ?1 WHERE id = ?2", params![priority, id])
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub fn delete_goal(db: State<Database>, id: String) -> Result<(), String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM goals WHERE id = ?1", params![id])

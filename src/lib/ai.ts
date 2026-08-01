@@ -267,7 +267,7 @@ async function executeAIAction(action: AIAction): Promise<AIAction> {
   }
 }
 
-function parseActionsFromQuery(lower: string, query: string): AIAction[] {
+export function parseActionsFromQuery(lower: string, query: string): AIAction[] {
   const actions: AIAction[] = [];
   const lines = query.split("\n");
 
@@ -278,7 +278,19 @@ function parseActionsFromQuery(lower: string, query: string): AIAction[] {
       const action = m[1].toLowerCase();
       const entity = m[2].toLowerCase();
       let data: any = {};
-      if (m[3]) { try { data = JSON.parse(`{${m[3]}}`); } catch { data = { raw: m[3] }; } }
+      if (m[3]) {
+        try {
+          const v = JSON.parse(m[3]);
+          data = v && typeof v === "object" && !Array.isArray(v) ? v : { raw: m[3] };
+        } catch {
+          try {
+            const v = JSON.parse(`{${m[3]}}`);
+            data = v && typeof v === "object" && !Array.isArray(v) ? v : { raw: m[3] };
+          } catch {
+            data = { raw: m[3] };
+          }
+        }
+      }
       if (action === "create") actions.push({ type: "create", entity, data });
       else if (action === "update") actions.push({ type: "update", entity, data, id: data?.id });
       else if (action === "delete") actions.push({ type: "delete", entity, id: data?.id });
@@ -287,7 +299,8 @@ function parseActionsFromQuery(lower: string, query: string): AIAction[] {
     }
 
     // Natural language patterns
-    const createP = line.match(/create\s+(?:a\s+)?(project|task|goal|habit|note|milestone)\s+(?:called|named|titled)?\s*["""]?(.+?)["""]?\s*(?:in|for|under)?\s*["""]?(.+?)?["""]?$/i);
+    const createP = line.match(/create\s+(?:a\s+)?(project|task|goal|habit|note|milestone)\s+(?:called|named|titled)?\s*"(.+?)"(?:\s+(?:in|for|under)\s+"(.+?)")?$/i)
+      || line.match(/create\s+(?:a\s+)?(project|task|goal|habit|note|milestone)\s+(?:called|named|titled)?\s*(?!(?:in|for|under)\s)([^"\n]+?)(?:\s+(?:in|for|under)\s+([^"\n]+?))?$/i);
     if (createP) {
       const entity = createP[1].toLowerCase();
       const title = createP[2].trim();
@@ -302,7 +315,7 @@ function parseActionsFromQuery(lower: string, query: string): AIAction[] {
   }
 
   // Single-line commands
-  const addTask = query.match(/(?:add|create)\s+(?:a\s+|the\s+|a new\s+)?task\s+(?:called\s+|named\s+|titled\s+)?["""]?(.+?)["""]?(?:\s+in\s+["""]?(.+?)["""]?)?$/i);
+  const addTask = query.match(/(?:add|create)\s+(?:a\s+|the\s+|a new\s+)?task\s+(?:called\s+|named\s+|titled\s+)?["""]?(?!(?:in|for|under)\s)(.+?)["""]?(?:\s+in\s+["""]?(.+?)["""]?)?$/i);
   if (addTask) {
     const data: any = { title: addTask[1].trim() };
     if (addTask[2]) data.quadrant = addTask[2].trim();
@@ -324,7 +337,13 @@ function parseActionsFromQuery(lower: string, query: string): AIAction[] {
     actions.push({ type: "update", entity: updateMatch[1].toLowerCase(), data: { identifier: updateMatch[2].trim(), status: updateMatch[3].replace(/\s+/g, "-") } });
   }
 
-  return actions;
+  const seen = new Set<string>();
+  return actions.filter((a) => {
+    const key = JSON.stringify([a.type, a.entity, a.data]);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 async function resolveActionIds(actions: AIAction[]): Promise<AIAction[]> {
@@ -619,6 +638,65 @@ export async function processChatMessage(
   const classified = classifyIntent(userMessage);
   thinking.push(`   → Intent: ${classified.intent} (confidence: ${(classified.confidence * 100).toFixed(0)}%)`);
 
+  // Step 1.5: Probe local LLM (llama-server) availability and pre-parse tool commands
+  let llamaRunning = false;
+  try {
+    const llama = await api.getLlamaStatus();
+    llamaRunning = !!llama && !!llama.running;
+  } catch (err) {
+    console.warn("llama status unavailable:", err);
+  }
+  const parsedActions = parseActionsFromQuery(userMessage.toLowerCase(), userMessage);
+
+  // Step 1.6: If the local LLM is running and no tool commands — route to it
+  if (llamaRunning && parsedActions.length === 0) {
+    thinking.push("⚡ Local LLM detected — routing to llama-server");
+    const ctx = await gatherRichContext();
+    const history = messageHistory.slice(-12);
+    const prompt = [
+      ...history.map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`),
+      `User: ${userMessage}`,
+    ].join("\n\n");
+    const system = [
+      "You are RAIVA OS, the user's personal AI assistant running on a local, private model.",
+      "You have real-time access to their personal knowledge system: notes, projects, tasks, habits, and visions.",
+      "",
+      `Current data snapshot: ${summarizeContext(ctx)}`,
+      "",
+      "Guidelines:",
+      "- Reply in the same language as the user.",
+      "- Be specific; reference their actual notes, projects, and tasks by name when relevant.",
+      "- Use **bold**, *italics*, and bullet lists when they help readability.",
+      "- Never invent data that isn't shown here; if unsure, say so and offer to look it up.",
+      "- For creating/updating items, suggest direct commands like \"Create a project called X\" — those are handled automatically.",
+    ].join("\n");
+    let message = "";
+    try {
+      const resp = await api.chatCompletion({
+        prompt,
+        system_prompt: system,
+        max_tokens: 600,
+        temperature: 0.7,
+      });
+      message = resp && resp.text ? String(resp.text).trim() : "";
+    } catch (err) {
+      console.warn("chat_completion failed — falling back to built-in engine:", err);
+    }
+    if (message) {
+      const elapsed = Date.now() - startTime;
+      thinking.push(`✅ Local LLM responded in ${elapsed}ms`);
+      await api.saveChatMessage(threadId, "user", userMessage);
+      await api.saveChatMessage(threadId, "assistant", message);
+      return {
+        message,
+        thinking: thinking.join("\n"),
+        actions: undefined,
+        suggestions: [],
+      };
+    }
+    thinking.push("   ⚠️ Local LLM unavailable — falling back to built-in engine");
+  }
+
   // Step 2: Gather rich context
   thinking.push("📚 Step 2: Gathering context from all sources...");
   const ctx = await gatherRichContext();
@@ -638,7 +716,6 @@ export async function processChatMessage(
 
   // Step 4: Parse and execute tool commands
   thinking.push("⚡ Step 4: Checking for tool commands...");
-  const parsedActions = parseActionsFromQuery(userMessage.toLowerCase(), userMessage);
   let executed: AIAction[] = [];
 
   if (parsedActions.length > 0) {

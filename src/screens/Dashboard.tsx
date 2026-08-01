@@ -4,7 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card"
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { timeAgo, truncate, stripHtml, cn } from "../lib/utils";
-import { loadSettings } from "../lib/settings";
+import { loadSettings, subscribeSettings } from "../lib/settings";
 import ChatWidget from "../components/ChatWidget";
 
 function getGreeting() {
@@ -23,6 +23,11 @@ export default function Dashboard({ onNavigate, onOpenNote }: DashboardProps) {
   const [stats, setStats] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [chatOpen, setChatOpen] = useState(false);
+  const [userName, setUserName] = useState(() => loadSettings().userName || "User");
+
+  useEffect(() => {
+    return subscribeSettings((s) => setUserName(s.userName || "User"));
+  }, []);
 
   useEffect(() => {
     async function load() {
@@ -87,7 +92,6 @@ export default function Dashboard({ onNavigate, onOpenNote }: DashboardProps) {
   }
 
   const greeting = getGreeting();
-  const userName = "User"; // Placeholder, can be improved later
   const date = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
 
   return (

@@ -43,7 +43,7 @@ export default function App() {
       <Layout activeScreen={screen} onNavigate={handleNavigate}>
         {screen === "dashboard" && <Dashboard onNavigate={handleNavigate} onOpenNote={(id) => { setSelectedNoteId(id); setScreen("note-editor"); }} />}
         {screen === "notes" && <NotesList onNavigate={handleNavigate} onOpenNote={(id) => { setSelectedNoteId(id); setScreen("note-editor"); }} />}
-        {screen === "note-editor" && <NoteEditor noteId={selectedNoteId} onBack={() => setScreen("notes")} />}
+        {screen === "note-editor" && <NoteEditor key={selectedNoteId ?? "new"} noteId={selectedNoteId} onBack={() => setScreen("notes")} />}
         {screen === "projects" && <ProjectsScreen />}
         {screen === "habits" && <HabitsScreen />}
         {screen === "tasks" && <TasksScreen />}

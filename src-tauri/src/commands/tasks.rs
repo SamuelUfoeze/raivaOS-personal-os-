@@ -59,11 +59,18 @@ pub fn update_task_status(db: State<Database>, id: String, status: String) -> Re
 }
 
 #[tauri::command]
-pub fn update_task(db: State<Database>, id: String, title: String, quadrant: String, duration_mins: i32) -> Result<(), String> {
+pub fn update_task(
+    db: State<Database>,
+    id: String,
+    title: Option<String>,
+    quadrant: Option<String>,
+    duration_mins: Option<i32>,
+    status: Option<String>,
+) -> Result<(), String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     conn.execute(
-        "UPDATE tasks SET title=?1, quadrant=?2, duration_mins=?3 WHERE id=?4",
-        params![title, quadrant, duration_mins, id],
+        "UPDATE tasks SET title=COALESCE(?1, title), quadrant=COALESCE(?2, quadrant), duration_mins=COALESCE(?3, duration_mins), status=COALESCE(?4, status) WHERE id=?5",
+        params![title, quadrant, duration_mins, status, id],
     ).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -74,6 +81,50 @@ pub fn delete_task(db: State<Database>, id: String) -> Result<(), String> {
     conn.execute("DELETE FROM tasks WHERE id = ?1", params![id])
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+pub fn get_all_tasks_with_sources(db: State<Database>) -> Result<Vec<TaskWithSource>, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(
+        "SELECT t.*, g.title as goal_title, g.project_id as goal_project_id, p.title as project_title
+         FROM tasks t
+         LEFT JOIN goals g ON t.goal_id = g.id
+         LEFT JOIN projects p ON g.project_id = p.id
+         ORDER BY t.created_at DESC"
+    ).map_err(|e| e.to_string())?;
+    let tasks = stmt.query_map([], |row| {
+        let goal_title: Option<String> = row.get("goal_title").ok();
+        let _goal_project_id: Option<String> = row.get("goal_project_id").ok();
+        let project_title: Option<String> = row.get("project_title").ok();
+        let goal_id: Option<String> = row.get("goal_id").ok();
+
+        let (source_label, source_id) = if let Some(ref gid) = goal_id {
+            if let (Some(ref gt), Some(ref pt)) = (&goal_title, &project_title) {
+                (format!("{} › {}", pt, gt), Some(gid.clone()))
+            } else {
+                (goal_title.clone().unwrap_or_default(), Some(gid.clone()))
+            }
+        } else {
+            (String::new(), None)
+        };
+
+        Ok(TaskWithSource {
+            id: row.get("id")?,
+            goal_id,
+            title: row.get("title")?,
+            duration_mins: row.get::<_, i32>("duration_mins").unwrap_or(25),
+            priority_score: row.get::<_, i32>("priority_score").unwrap_or(5),
+            quadrant: row.get::<_, String>("quadrant").unwrap_or("inbox".into()),
+            status: row.get::<_, String>("status").unwrap_or("pending".into()),
+            created_at: row.get("created_at")?,
+            source_label,
+            source_id,
+        })
+    }).map_err(|e| e.to_string())?
+    .filter_map(|r| r.ok())
+    .collect();
+    Ok(tasks)
 }
 
 #[tauri::command]

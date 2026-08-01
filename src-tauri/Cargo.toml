@@ -1,6 +1,6 @@
 [package]
 name = "raiva-os"
-version = "1.4.0"
+version = "1.5.0"
 description = "RAIVA Personal Operating System"
 authors = ["RAIVA"]
 edition = "2021"

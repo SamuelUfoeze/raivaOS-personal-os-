@@ -159,6 +159,17 @@ export interface ProjectWithGoals {
   progress: number;
 }
 
+export interface GetAllData {
+  notes: Note[];
+  habits: Habit[];
+  habit_today_status: HabitWithStatus[];
+  projects: ProjectWithGoals[];
+  tasks: Task[];
+  goals: GoalWithProgress[];
+  visions: LifeVision[];
+  tags: Tag[];
+}
+
 export interface GoalWithTasks {
   goal: Goal;
   tasks: Task[];

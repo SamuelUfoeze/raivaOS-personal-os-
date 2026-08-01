@@ -8,6 +8,8 @@ pub mod audit;
 pub mod chat;
 pub mod tags;
 pub mod llm;
+pub mod focus;
+pub mod get_all;
 
 pub use notes::*;
 pub use habits::*;
@@ -19,3 +21,5 @@ pub use audit::*;
 pub use chat::*;
 pub use tags::*;
 pub use llm::*;
+pub use focus::*;
+pub use get_all::*;

@@ -60,6 +60,7 @@ pub struct LlamaState {
 
 pub struct DownloadHandle {
     pub cancel: Arc<AtomicBool>,
+    pub progress: Arc<Mutex<f64>>,
 }
 
 impl LlamaState {
@@ -126,13 +127,22 @@ pub async fn download_model(
         return Err("Model already downloaded".into());
     }
 
+    // Download to a .part temp file so an interrupted download never leaves
+    // a corrupt file at the final path. Stale partials are cleaned up here.
+    let part_path = model_path.with_extension("gguf.part");
+    if part_path.exists() {
+        let _ = std::fs::remove_file(&part_path);
+    }
+
     let cancel = Arc::new(AtomicBool::new(false));
+    let progress = Arc::new(Mutex::new(0.0));
     {
         let mut downloads = state.downloads.lock().map_err(|e| e.to_string())?;
         downloads.insert(
             model_id.clone(),
             DownloadHandle {
                 cancel: Arc::clone(&cancel),
+                progress: Arc::clone(&progress),
             },
         );
     }
@@ -149,7 +159,7 @@ pub async fn download_model(
         .unwrap_or(0);
 
     let mut downloaded: u64 = 0;
-    let mut file = tokio::fs::File::create(&model_path)
+    let mut file = tokio::fs::File::create(&part_path)
         .await
         .map_err(|e| format!("Failed to create file: {}", e))?;
 
@@ -158,33 +168,47 @@ pub async fn download_model(
     use futures_util::StreamExt;
     while let Some(chunk) = stream.next().await {
         if cancel.load(Ordering::Relaxed) {
-            let _ = tokio::fs::remove_file(&model_path).await;
-    let mut downloads = state.downloads.lock().map_err(|e| e.to_string())?;
+            let _ = tokio::fs::remove_file(&part_path).await;
+            let mut downloads = state.downloads.lock().map_err(|e| e.to_string())?;
             downloads.remove(&model_id);
             return Err("Download cancelled".into());
         }
-        let chunk = chunk.map_err(|e| format!("Download stream error: {}", e))?;
+        let chunk = chunk.map_err(|e| {
+            let _ = std::fs::remove_file(&part_path);
+            format!("Download stream error: {}", e)
+        })?;
         downloaded += chunk.len() as u64;
         tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
             .await
-            .map_err(|e| format!("Write error: {}", e))?;
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&part_path);
+                format!("Write error: {}", e)
+            })?;
 
-        let progress = if total_size > 0 {
+        let progress_value = if total_size > 0 {
             downloaded as f64 / total_size as f64 * 100.0
         } else {
             0.0
         };
+        if let Ok(mut p) = progress.lock() {
+            *p = progress_value;
+        }
 
         let _ = app.emit(
             "download-progress",
             DownloadProgress {
                 model_id: model_id.clone(),
-                progress,
+                progress: progress_value,
                 downloaded_bytes: downloaded,
                 total_bytes: total_size,
             },
         );
     }
+
+    drop(file);
+    tokio::fs::rename(&part_path, &model_path)
+        .await
+        .map_err(|e| format!("Failed to finalize download: {}", e))?;
 
     {
         let mut downloads = state.downloads.lock().map_err(|e| e.to_string())?;
@@ -214,6 +238,7 @@ pub async fn cancel_download(
 #[tauri::command]
 pub async fn get_model_status(
     app: tauri::AppHandle,
+    state: tauri::State<'_, LlamaState>,
     model_id: String,
 ) -> Result<ModelStatus, String> {
     let model = available_models()
@@ -228,10 +253,26 @@ pub async fn get_model_status(
     let model_path = app_dir.join("models").join(&model.filename);
     let downloaded = model_path.exists();
 
+    let (downloading, progress) = {
+        let downloads = state.downloads.lock().map_err(|e| e.to_string())?;
+        if let Some(handle) = downloads.get(&model_id) {
+            let p = *handle.progress.lock().map_err(|e| e.to_string())?;
+            (true, p)
+        } else {
+            (false, 0.0)
+        }
+    };
+
     Ok(ModelStatus {
         downloaded,
-        downloading: false,
-        progress: if downloaded { 100.0 } else { 0.0 },
+        downloading,
+        progress: if downloaded {
+            100.0
+        } else if downloading {
+            progress
+        } else {
+            0.0
+        },
         path: if downloaded {
             Some(model_path.to_string_lossy().to_string())
         } else {
@@ -240,8 +281,32 @@ pub async fn get_model_status(
     })
 }
 
+fn find_llama_server(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    if let Ok(dir) = app.path().resource_dir() {
+        for candidate in [
+            dir.join("llama-server"),
+            dir.join("binaries").join("llama-server"),
+            dir.join("llama").join("llama-server"),
+        ] {
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join("llama-server");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
 #[tauri::command]
 pub async fn start_llama_server(
+    app: tauri::AppHandle,
     state: tauri::State<'_, LlamaState>,
     model_path: String,
     port: u16,
@@ -252,7 +317,26 @@ pub async fn start_llama_server(
         return Err("Server already running".into());
     }
 
-    let child = Command::new("llama-server")
+    if !std::path::Path::new(&model_path).exists() {
+        return Err(format!("Model file not found: {}", model_path));
+    }
+
+    let binary = find_llama_server(&app)
+        .ok_or_else(|| "llama-server binary not found (not bundled and not on PATH)".to_string())?;
+
+    // The llama.cpp launcher loads libllama-server-impl.so from $ORIGIN.
+    // Set LD_LIBRARY_PATH defensively so the libs are found whether they
+    // land beside the launcher, in a llama/ subdir, or in binaries/.
+    let lib_path = app
+        .path()
+        .resource_dir()
+        .map(|d| {
+            let d = d.to_string_lossy().to_string();
+            format!("{}/binaries:{}/llama:{}", d, d, d)
+        })
+        .unwrap_or_default();
+
+    let child = Command::new(binary)
         .args([
             "-m", &model_path,
             "--port", &port.to_string(),
@@ -260,6 +344,7 @@ pub async fn start_llama_server(
             "-c", "4096",
             "--mlock",
         ])
+        .env("LD_LIBRARY_PATH", lib_path)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

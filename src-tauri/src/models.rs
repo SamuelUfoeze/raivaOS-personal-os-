@@ -176,6 +176,18 @@ pub struct GoalWithTasks {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetAllData {
+    pub notes: Vec<Note>,
+    pub habits: Vec<Habit>,
+    pub habit_today_status: Vec<HabitWithStatus>,
+    pub projects: Vec<ProjectWithGoals>,
+    pub tasks: Vec<Task>,
+    pub goals: Vec<GoalWithProgress>,
+    pub visions: Vec<LifeVision>,
+    pub tags: Vec<Tag>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateNoteRequest {
     pub title: String,
     pub content: String,
@@ -209,11 +221,35 @@ pub struct CreateProjectRequest {
     pub color: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateProjectRequest {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateGoalRequest {
     pub project_id: String,
     pub title: String,
     pub priority: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskWithSource {
+    pub id: String,
+    pub goal_id: Option<String>,
+    pub title: String,
+    pub duration_mins: i32,
+    pub priority_score: i32,
+    pub quadrant: String,
+    pub status: String,
+    pub created_at: String,
+    pub source_label: String,
+    pub source_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

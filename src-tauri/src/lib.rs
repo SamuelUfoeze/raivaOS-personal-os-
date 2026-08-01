@@ -8,6 +8,10 @@ use commands::llm::LlamaState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -51,6 +55,7 @@ pub fn run() {
             // Goals
             commands::get_all_goals,
             commands::create_goal,
+            commands::update_goal,
             commands::delete_goal,
             // Tasks
             commands::get_all_tasks,
@@ -59,6 +64,10 @@ pub fn run() {
             commands::update_task,
             commands::delete_task,
             commands::get_tasks_by_quadrant,
+            commands::get_all_tasks_with_sources,
+            // Focus Sessions
+            commands::log_focus_session,
+            commands::get_focus_sessions,
             // Chat
             commands::get_chat_threads,
             commands::create_chat_thread,
@@ -72,6 +81,8 @@ pub fn run() {
             // Audit
             commands::get_latest_audit,
             commands::run_audit,
+            // Batch
+            commands::get_all,
             // LLM
             commands::get_available_models,
             commands::download_model,

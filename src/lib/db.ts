@@ -33,6 +33,11 @@ function invokeWithTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   ]);
 }
 
+// Commands that legitimately run for minutes (LLM downloads, chat) must not
+// race the 5s IPC timeout — otherwise they appear to "do nothing" and get
+// silently shadowed by the browser-mode mock fallback.
+const LONG_RUNNING = new Set(["download_model", "chat_completion"]);
+
 // ── In-memory cache ──────────────────────────────────────────────
 const dataCache = new Map<string, { data: any }>();
 
@@ -55,31 +60,31 @@ function isWriteCmd(cmd: string): boolean {
 // Maps write commands to read prefixes they invalidate
 function affectedReadPrefixes(cmd: string): string[] {
   const map: Record<string, string[]> = {
-    create_note: ["get_all_notes", "get_all_tags"],
-    update_note: ["get_all_notes", "get_all_tags"],
-    delete_note: ["get_all_notes", "get_all_tags"],
-    toggle_favorite: ["get_all_notes"],
-    create_habit: ["get_all_habits"],
-    update_habit: ["get_all_habits"],
-    delete_habit: ["get_all_habits", "get_habit_today_status"],
-    log_habit_tick: ["get_habit_today_status", "get_habit_logs", "get_habit_logs_all"],
-    create_project: ["get_all_projects"],
-    update_project: ["get_all_projects"],
-    delete_project: ["get_all_projects"],
-    create_goal: ["get_all_goals", "get_all_projects"],
-    update_goal: ["get_all_goals", "get_all_projects"],
-    delete_goal: ["get_all_goals", "get_all_projects"],
-    create_task: ["get_all_tasks", "get_all_tasks_with_sources", "get_tasks_by_quadrant"],
-    update_task: ["get_all_tasks", "get_all_tasks_with_sources", "get_tasks_by_quadrant"],
-    update_task_status: ["get_all_tasks", "get_all_tasks_with_sources", "get_tasks_by_quadrant"],
-    delete_task: ["get_all_tasks", "get_all_tasks_with_sources", "get_tasks_by_quadrant"],
-    create_chat_thread: ["get_chat_threads"],
-    delete_chat_thread: ["get_chat_threads"],
-    save_chat_message: ["get_chat_messages"],
-    upsert_vision: ["get_all_visions"],
-    delete_vision: ["get_all_visions"],
-    log_focus_session: ["get_focus_sessions"],
-    run_audit: ["get_latest_audit"],
+    create_note: ["get_all_notes", "get_all_tags", "get_all"],
+    update_note: ["get_all_notes", "get_all_tags", "get_all"],
+    delete_note: ["get_all_notes", "get_all_tags", "get_all"],
+    toggle_favorite: ["get_all_notes", "get_all"],
+    create_habit: ["get_all_habits", "get_all"],
+    update_habit: ["get_all_habits", "get_all"],
+    delete_habit: ["get_all_habits", "get_habit_today_status", "get_all"],
+    log_habit_tick: ["get_habit_today_status", "get_habit_logs", "get_habit_logs_all", "get_all"],
+    create_project: ["get_all_projects", "get_all"],
+    update_project: ["get_all_projects", "get_all"],
+    delete_project: ["get_all_projects", "get_all"],
+    create_goal: ["get_all_goals", "get_all_projects", "get_all"],
+    update_goal: ["get_all_goals", "get_all_projects", "get_all"],
+    delete_goal: ["get_all_goals", "get_all_projects", "get_all"],
+    create_task: ["get_all_tasks", "get_all_tasks_with_sources", "get_tasks_by_quadrant", "get_all"],
+    update_task: ["get_all_tasks", "get_all_tasks_with_sources", "get_tasks_by_quadrant", "get_all"],
+    update_task_status: ["get_all_tasks", "get_all_tasks_with_sources", "get_tasks_by_quadrant", "get_all"],
+    delete_task: ["get_all_tasks", "get_all_tasks_with_sources", "get_tasks_by_quadrant", "get_all"],
+    create_chat_thread: ["get_chat_threads", "get_all"],
+    delete_chat_thread: ["get_chat_threads", "get_all"],
+    save_chat_message: ["get_chat_messages", "get_all"],
+    upsert_vision: ["get_all_visions", "get_all"],
+    delete_vision: ["get_all_visions", "get_all"],
+    log_focus_session: ["get_focus_sessions", "get_all"],
+    run_audit: ["get_latest_audit", "get_all"],
   };
   return map[cmd] ?? [];
 }
@@ -134,7 +139,9 @@ export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Pr
         cmd: string,
         args?: Record<string, unknown>,
       ) => Promise<T>;
-      data = await invokeWithTimeout(ti(cmd, args), 5_000);
+      data = LONG_RUNNING.has(cmd)
+        ? await ti(cmd, args)
+        : await invokeWithTimeout(ti(cmd, args), 5_000);
     } catch (e) {
       console.warn(`Tauri IPC failed for "${cmd}", falling back to mock:`, e);
       ensureSync();
@@ -156,12 +163,7 @@ export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Pr
 
 // ── Eager prefetch (call once on startup) ────────────────────────
 export function prefetchAll(): Promise<void> {
-  return invoke("get_all_notes")
-    .then(() => invoke("get_all_tasks"))
-    .then(() => invoke("get_all_projects"))
-    .then(() => invoke("get_all_habits"))
-    .then(() => invoke("get_habit_today_status"))
-    .then(() => {});
+  return invoke("get_all").then(() => {});
 }
 
 // ── localStorage-based mock for browser dev ──────────────────────
@@ -729,6 +731,67 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
       return { text: "(mock) Local LLM not available in browser mode." } as T;
     }
 
+    // ── Batch ──
+    case "get_all": {
+      const notes = loadTable<any>("notes").filter((n: any) => !n.is_deleted);
+      const habits = loadTable<any>("habits");
+      const logs = loadTable<any>("habit_logs");
+      const projects = loadTable<any>("projects").filter((p: any) => p.status !== "archived");
+      const goals = loadTable<any>("goals");
+      const allTasks = loadTable<any>("tasks");
+      const visions = loadTable<any>("visions");
+
+      // Tags
+      const seen = new Set<string>();
+      const tags: any[] = [];
+      for (const n of notes) {
+        for (const t of (n.tags ?? [])) {
+          if (!seen.has(t.name)) { seen.add(t.name); tags.push(t); }
+        }
+      }
+
+      // Habit today status
+      const td = today();
+      const habit_today_status = habits
+        .filter((h: any) => !h.archived)
+        .map((h: any) => ({
+          habit: h,
+          done_today: logs.some((l: any) => l.habit_id === h.id && l.date_string === td && l.status),
+          streak: calcStreak(logs, h.id, td),
+          weekly_logs: logs.filter((l: any) => l.habit_id === h.id).sort((a: any, b: any) => b.date_string.localeCompare(a.date_string)).slice(0, 7),
+        }));
+
+      // Projects with goals
+      const projects_with_goals = projects.map((p: any) => {
+        const pGoals = goals.filter((g: any) => g.project_id === p.id);
+        const goalsWithTasks = pGoals.map((g: any) => {
+          const gTasks = allTasks.filter((t: any) => t.goal_id === g.id);
+          const done = gTasks.filter((t: any) => t.status === "done").length;
+          return { goal: g, tasks: gTasks, progress: gTasks.length ? (done / gTasks.length) * 100 : 0 };
+        });
+        const totalProgress = goalsWithTasks.reduce((s: number, g: any) => s + g.progress, 0);
+        return { project: p, goals: goalsWithTasks, progress: goalsWithTasks.length ? totalProgress / goalsWithTasks.length : 0 };
+      });
+
+      // Goals with progress
+      const goals_with_progress = goals.map((g: any) => {
+        const proj = projects.find((p: any) => p.id === g.project_id);
+        const gTasks = allTasks.filter((t: any) => t.goal_id === g.id);
+        return { goal: g, project_title: proj?.title ?? "Unknown", project_color: proj?.color ?? "#7C3AED", total_tasks: gTasks.length, done_tasks: gTasks.filter((t: any) => t.status === "done").length };
+      });
+
+      return {
+        notes,
+        habits,
+        habit_today_status,
+        projects: projects_with_goals,
+        tasks: allTasks,
+        goals: goals_with_progress,
+        visions,
+        tags,
+      } as T;
+    }
+
     default: {
       console.warn(`Unhandled mock command: ${cmd}`, args);
       return null as T;
@@ -757,6 +820,9 @@ function calcStreak(logs: any[], habitId: string, td: string): number {
 // ── Re-exported API ──────────────────────────────────────────────
 
 export const api = {
+  // Batch
+  getAllData: () => invoke<T.GetAllData>("get_all"),
+
   // Notes
   getNotes: () => invoke<any[]>("get_all_notes"),
   getNote: (id: string) => invoke<any>("get_note", { id }),

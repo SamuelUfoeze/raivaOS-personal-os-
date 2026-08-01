@@ -24,11 +24,19 @@ const RichTextEditor = forwardRef<RTEHandle, RichTextEditorProps>(
   const initialized = useRef(false);
 
   useEffect(() => {
-    if (editorRef.current && !initialized.current) {
+    if (!editorRef.current) return;
+    if (!initialized.current) {
       editorRef.current.innerHTML = value;
       initialized.current = true;
+      return;
     }
-  }, []);
+    // Sync externally changed value (e.g. note loaded async or note switched)
+    // without clobbering the user's caret while they are typing.
+    const html = editorRef.current.innerHTML;
+    if (html !== value && document.activeElement !== editorRef.current) {
+      editorRef.current.innerHTML = value;
+    }
+  }, [value]);
 
   const emitChange = useCallback(() => {
     if (editorRef.current) {

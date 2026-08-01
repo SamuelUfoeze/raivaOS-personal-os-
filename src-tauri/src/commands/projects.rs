@@ -96,11 +96,11 @@ pub fn create_project(db: State<Database>, req: CreateProjectRequest) -> Result<
 }
 
 #[tauri::command]
-pub fn update_project(db: State<Database>, id: String, title: String, description: String, color: String) -> Result<(), String> {
+pub fn update_project(db: State<Database>, id: String, req: UpdateProjectRequest) -> Result<(), String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     conn.execute(
-        "UPDATE projects SET title=?1, description=?2, color=?3 WHERE id=?4",
-        params![title, description, color, id],
+        "UPDATE projects SET title=COALESCE(?1, title), description=COALESCE(?2, description), color=COALESCE(?3, color) WHERE id=?4",
+        params![req.title, req.description, req.color, id],
     ).map_err(|e| e.to_string())?;
     Ok(())
 }
